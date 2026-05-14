@@ -20,9 +20,6 @@ on:
         required: false
         default: '18000'
         type: string
-  workflow_run:
-    types: [completed]
-    workflows: ["Elaph Crawl (Full/Incremental)"]
 
 env:
   PYTHON_VERSION: '3.11'
@@ -30,7 +27,6 @@ env:
 jobs:
   crawl:
     name: Elaph Crawler
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
 
@@ -44,22 +40,22 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
-        run: pip install -r elaph-crawler/requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Write GCP service account key
         run: |
-          mkdir -p elaph-crawler/data
-          echo '${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}' > elaph-crawler/data/service-account.json
+          mkdir -p data
+          echo '${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}' > data/service-account.json
 
       - name: Write .env file
         run: |
-          cat > elaph-crawler/.env << 'ENVEOF'
+          cat > .env << 'ENVEOF'
           SUPABASE_URL=${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}
           GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}
           BIGQUERY_DATASET=elaph_content
           BIGQUERY_TABLE=elaph_pages
-          GOOGLE_CREDENTIALS_PATH=./elaph-crawler/data/service-account.json
+          GOOGLE_CREDENTIALS_PATH=./data/service-account.json
           SITEMAP_MAIN=https://elaph.com/sitemaps/allsitemaps.xml
           SITEMAP_GOOGLE_NEWS=https://elaph.com/sitemaps/google_news.xml
           BATCH_SIZE=5
@@ -67,18 +63,16 @@ jobs:
           MAX_RETRIES=3
           MAX_URL_FAILURES=5
           LOG_LEVEL=INFO
-          LOG_FILE=./elaph-crawler/logs/elaph_crawler.log
+          LOG_FILE=./logs/elaph_crawler.log
           ENVEOF
 
       - name: Run diagnostics
-        working-directory: elaph-crawler
         run: python -c "from elaph_crawler.pipeline import ElaphPipeline; p = ElaphPipeline(dry_run=False); p.run_diagnostics()"
         env:
           PYTHONUNBUFFERED: 1
 
       - name: Check pending URL count
         id: pending-check
-        working-directory: elaph-crawler
         run: |
           count=$(python -c "
           from elaph_crawler.core import SupabaseManager
@@ -91,15 +85,13 @@ jobs:
           echo "Pending URLs: $count"
 
       - name: Update sitemap state
-        if: github.event_name == 'workflow_dispatch' || steps.pending-check.outputs.pending_count > 0
-        working-directory: elaph-crawler
+        if: steps.pending-check.outputs.pending_count > 0
         run: python elaph_crawler/pipeline.py --update-sitemap
         env:
           PYTHONUNBUFFERED: 1
 
       - name: Run crawl
         if: steps.pending-check.outputs.pending_count > 0
-        working-directory: elaph-crawler
         run: |
           MAX_URLS_ARG=""
           if [ -n "${{ github.event.inputs.max_urls }}" ]; then
@@ -115,7 +107,6 @@ jobs:
       - name: Check if more work needed
         id: more-work
         if: always()
-        working-directory: elaph-crawler
         run: |
           count=$(python -c "
           from elaph_crawler.core import SupabaseManager
@@ -132,11 +123,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: elaph-crawl-logs-${{ github.run_number }}
-          path: elaph-crawler/logs/
+          path: logs/
           retention-days: 14
 
-      - name: Self-trigger next job if pending
-        if: steps.more-work.outputs.pending_count > 0 && github.event_name != 'workflow_dispatch'
+      - name: Self-chain next run if pending
+        if: steps.more-work.outputs.pending_count > 0
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "More URLs pending, triggering next run..."
-          echo "pending_count=${{ steps.more-work.outputs.pending_count }}"
+          echo "More URLs pending (${{ steps.more-work.outputs.pending_count }}), triggering next run..."
+          gh workflow run elaph-crawl.yml \
+            -f mode=incremental \
+            -f time_limit=18000
