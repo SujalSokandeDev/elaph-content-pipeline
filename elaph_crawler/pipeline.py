@@ -430,7 +430,7 @@ class ElaphPipeline:
             self.logger.info("")
             self.logger.info("Recent Checkpoints:")
             for cp in checkpoints:
-                status_icon = "✅" if cp.get("status") == "completed" else "🔄" if cp.get("status") == "running" else "❌"
+                status_icon = "[OK]" if cp.get("status") == "completed" else "[..]" if cp.get("status") == "running" else "[!!]"
                 self.logger.info(
                     f"  {status_icon} {cp.get('crawl_id', 'N/A')[:40]} | "
                     f"Mode: {cp.get('mode', 'N/A')} | "
