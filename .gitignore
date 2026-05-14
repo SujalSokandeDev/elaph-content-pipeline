@@ -1,0 +1,43 @@
+# Environment / Secrets — NEVER commit
+.env
+.env.local
+.env.*
+!.env.example
+
+# GCP service account / sensitive data
+data/
+
+# Logs
+logs/
+*.log
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Test files
+test_*.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation / Schema (local reference only)
+GITHUB_SECRETS.md
+supabase_schema.sql

@@ -1,0 +1,16 @@
+# Elaph Crawler Dependencies
+
+# Core scraping
+scrapling[fetchers]>=0.2.0
+
+# Supabase
+supabase>=2.0.0
+
+# Google BigQuery
+google-cloud-bigquery>=3.0.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# Utilities
+requests>=2.31.0

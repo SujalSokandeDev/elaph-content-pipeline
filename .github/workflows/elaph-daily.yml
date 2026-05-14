@@ -1,0 +1,108 @@
+name: Elaph Daily (Incremental)
+
+on:
+  schedule:
+    # Run at midnight UTC daily
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      force-full:
+        description: 'Force full re-crawl'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  daily-crawl:
+    name: Elaph Daily Crawl
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r elaph-crawler/requirements.txt
+
+      - name: Write GCP service account key
+        run: |
+          mkdir -p elaph-crawler/data
+          echo '${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}' > elaph-crawler/data/service-account.json
+
+      - name: Write .env file
+        run: |
+          cat > elaph-crawler/.env << 'ENVEOF'
+          SUPABASE_URL=${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}
+          GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}
+          BIGQUERY_DATASET=elaph_content
+          BIGQUERY_TABLE=elaph_pages
+          GOOGLE_CREDENTIALS_PATH=./elaph-crawler/data/service-account.json
+          SITEMAP_MAIN=https://elaph.com/sitemaps/allsitemaps.xml
+          SITEMAP_GOOGLE_NEWS=https://elaph.com/sitemaps/google_news.xml
+          BATCH_SIZE=5
+          REQUEST_DELAY=1.0
+          MAX_RETRIES=3
+          MAX_URL_FAILURES=5
+          LOG_LEVEL=INFO
+          LOG_FILE=./elaph-crawler/logs/elaph_crawler.log
+          ENVEOF
+
+      - name: Run diagnostics
+        working-directory: elaph-crawler
+        run: python -c "from elaph_crawler.pipeline import ElaphPipeline; p = ElaphPipeline(dry_run=false); p.run_diagnostics()"
+        env:
+          PYTHONUNBUFFERED: 1
+
+      - name: Update sitemap state (find new/changed URLs)
+        working-directory: elaph-crawler
+        run: python elaph_crawler/pipeline.py --update-sitemap
+        env:
+          PYTHONUNBUFFERED: 1
+
+      - name: Check pending URLs
+        id: pending-check
+        working-directory: elaph-crawler
+        run: |
+          count=$(python -c "
+from elaph_crawler.core import SupabaseManager
+from elaph_crawler.utils import Config
+config = Config.load()
+db = SupabaseManager(config.supabase_url, config.supabase_key)
+print(db.get_pending_count())
+")
+          echo "pending_count=$count" >> $GITHUB_OUTPUT
+          echo "New/changed URLs to crawl: $count"
+
+      - name: Run incremental crawl
+        if: steps.pending-check.outputs.pending_count > 0
+        working-directory: elaph-crawler
+        run: |
+          mode="incremental"
+          if [ "${{ github.event.inputs.force-full }}" == "true" ]; then
+            mode="full"
+          fi
+          python elaph_crawler/pipeline.py --mode $mode --time-limit 3600
+        env:
+          PYTHONUNBUFFERED: 1
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: elaph-daily-logs-${{ github.run_number }}
+          path: elaph-crawler/logs/
+          retention-days: 14
+
+      - name: Summary
+        run: |
+          echo "Daily crawl completed at $(date)"
