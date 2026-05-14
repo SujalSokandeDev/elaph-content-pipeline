@@ -287,6 +287,7 @@ class ElaphPipeline:
         self.db.create_checkpoint(crawl_id, mode, total_urls=0)
 
         batch = []
+        batch_urls = []  # track URLs in current batch for deferred marking
         batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
         processed = 0
@@ -338,38 +339,35 @@ class ElaphPipeline:
                         )
 
                         batch.append(article)
+                        batch_urls.append({"url": url, "content_hash": content_hash})
                         processed += 1
                         successful += 1
 
-                        self.db.mark_url_done(
-                            url, batch_id, content_hash
-                        )
-
                         if len(batch) >= self.config.batch_size:
-                            inserted, errors = self._flush_batch(batch, batch_id)
+                            self._flush_and_mark(batch, batch_urls, batch_id)
                             batch = []
+                            batch_urls = []
                             batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
                     else:
                         failed += 1
-                        self.db.mark_url_done(
-                            url, batch_id, "", "No content extracted"
-                        )
+                        self.db.mark_url_error(url, "No content extracted")
                 else:
                     failed += 1
-                    self.db.mark_url_done(
-                        url, batch_id, "", f"HTTP {response.status if response else 'No response'}"
+                    self.db.mark_url_error(
+                        url, f"HTTP {response.status if response else 'No response'}"
                     )
 
             except Exception as e:
                 failed += 1
-                self.db.mark_url_done(url, batch_id, "", str(e))
+                self.db.mark_url_error(url, str(e))
                 self.logger.debug(f"Error crawling {url}: {e}")
 
             time.sleep(self.config.request_delay)
 
+        # Flush remaining batch
         if batch:
-            self._flush_batch(batch, batch_id)
+            self._flush_and_mark(batch, batch_urls, batch_id)
 
         self.db.update_checkpoint(
             crawl_id,
@@ -399,19 +397,29 @@ class ElaphPipeline:
             "pending": stats["pending"],
         }
 
-    def _flush_batch(self, batch: List[Dict], batch_id: str) -> Tuple[int, int]:
-        """Flush accumulated pages to BigQuery."""
+    def _flush_and_mark(self, batch: List[Dict], batch_urls: List[Dict], batch_id: str):
+        """Flush batch to BigQuery, then mark URLs as done only on success."""
         if not batch:
-            return 0, 0
+            return
 
         try:
-            inserted, failed, error_list = self.bq_manager.insert_batch(batch, batch_id)
+            inserted, failed_count, error_list = self.bq_manager.insert_batch(batch, batch_id)
             if error_list:
-                self.logger.warning(f"Batch insert had {failed} errors: {error_list[:2]}")
-            return inserted, failed
+                self.logger.warning(f"Batch insert had {failed_count} errors: {error_list[:2]}")
+
+            if failed_count == 0:
+                # BigQuery insert succeeded — now mark all batch URLs as done
+                for item in batch_urls:
+                    self.db.mark_url_done(item["url"], batch_id, item["content_hash"])
+            else:
+                # BigQuery insert failed — mark URLs as error so they get retried
+                for item in batch_urls:
+                    self.db.mark_url_error(item["url"], f"BigQuery batch insert failed: {error_list[:1]}")
         except Exception as e:
             self.logger.error(f"Batch insert failed: {e}")
-            return 0, len(batch)
+            # Mark all URLs in failed batch as error so they get retried
+            for item in batch_urls:
+                self.db.mark_url_error(item["url"], f"BigQuery exception: {str(e)[:200]}")
 
     def show_stats(self):
         """Display crawl statistics."""

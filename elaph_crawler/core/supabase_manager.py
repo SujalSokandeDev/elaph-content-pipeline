@@ -37,21 +37,21 @@ class SupabaseManager:
 
     def upsert_urls(self, urls: List[Dict[str, Any]], batch_size: int = 1000) -> int:
         """
-        Upsert URLs into crawl state table.
-        New URLs are inserted as pending.
-        Existing URLs with newer lastmod are reset to pending.
+        Insert new URLs into crawl state table.
+        Only genuinely new URLs are inserted as pending.
+        Existing URLs (already done/pending/error) are NOT modified.
 
         Args:
             urls: List of dicts with 'url' and optional 'lastmod'
             batch_size: Number of URLs per batch (default 1000)
 
         Returns:
-            Count of URLs upserted
+            Count of new URLs inserted
         """
         if not urls:
             return 0
 
-        total_upserted = 0
+        total_inserted = 0
         total_batches = (len(urls) + batch_size - 1) // batch_size
         for i in range(0, len(urls), batch_size):
             batch = urls[i:i + batch_size]
@@ -69,19 +69,19 @@ class SupabaseManager:
                 resp = self.client.table(self.STATE_TABLE).upsert(
                     rows,
                     on_conflict="url",
-                    ignore_duplicates=False,
+                    ignore_duplicates=True,
                 ).execute()
-                batch_count = len(resp.data) if resp.data else len(rows)
-                total_upserted += batch_count
+                batch_count = len(resp.data) if resp.data else 0
+                total_inserted += batch_count
                 batch_num = i // batch_size + 1
                 if batch_num % 10 == 0 or batch_num == total_batches:
-                    logging.info(f"Progress: {batch_num}/{total_batches} batches ({total_upserted} URLs)")
+                    logging.info(f"Progress: {batch_num}/{total_batches} batches ({total_inserted} new URLs)")
             except Exception as e:
                 batch_num = i // batch_size + 1
                 logging.error(f"Batch {batch_num} failed: {e}")
                 continue
 
-        return total_upserted
+        return total_inserted
 
     def get_pending_urls(self, limit: int = 1000) -> List[Dict]:
         """
@@ -152,56 +152,56 @@ class SupabaseManager:
         url: str,
         batch_id: str,
         content_hash: str,
-        error_message: str = None,
     ) -> bool:
         """
-        Mark a URL as successfully crawled or failed.
+        Mark a URL as successfully crawled and inserted to BigQuery.
 
         Args:
             url: The URL that was crawled
             batch_id: BigQuery batch ID
             content_hash: Hash of the content
-            error_message: Error message if failed
 
         Returns:
             True if update succeeded
         """
         update_data = {
+            "status": "done",
             "crawled_at": datetime.now().isoformat(),
             "batch_id": batch_id,
             "content_hash": content_hash,
-            "scrape_count": self._get_scrape_count(url) + 1,
+            "error_message": None,
         }
-
-        if error_message:
-            update_data["status"] = "error"
-            update_data["error_message"] = error_message
-        else:
-            update_data["status"] = "done"
 
         try:
             self.client.table(self.STATE_TABLE).update(update_data).eq(
                 "url", url
             ).execute()
             return True
-        except Exception:
+        except Exception as e:
+            logging.error(f"Failed to mark URL done: {url}: {e}")
             return False
 
-    def _get_scrape_count(self, url: str) -> int:
-        """Get current scrape count for a URL."""
+    def mark_url_error(self, url: str, error_message: str) -> bool:
+        """
+        Mark a URL as failed with an error message.
+
+        Args:
+            url: The URL that failed
+            error_message: Description of what went wrong
+
+        Returns:
+            True if update succeeded
+        """
         try:
-            resp = (
-                self.client.table(self.STATE_TABLE)
-                .select("scrape_count")
-                .eq("url", url)
-                .limit(1)
-                .execute()
-            )
-            if resp.data:
-                return resp.data[0].get("scrape_count", 0)
-        except Exception:
-            pass
-        return 0
+            self.client.table(self.STATE_TABLE).update({
+                "status": "error",
+                "error_message": error_message[:500],
+                "crawled_at": datetime.now().isoformat(),
+            }).eq("url", url).execute()
+            return True
+        except Exception as e:
+            logging.error(f"Failed to mark URL error: {url}: {e}")
+            return False
 
     def reset_to_pending(self) -> int:
         """Reset all done URLs to pending (for full re-crawl)."""
