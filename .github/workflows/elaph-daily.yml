@@ -59,7 +59,7 @@ jobs:
 
       - name: Run diagnostics
         working-directory: elaph-crawler
-        run: python -c "from elaph_crawler.pipeline import ElaphPipeline; p = ElaphPipeline(dry_run=false); p.run_diagnostics()"
+        run: python -c "from elaph_crawler.pipeline import ElaphPipeline; p = ElaphPipeline(dry_run=False); p.run_diagnostics()"
         env:
           PYTHONUNBUFFERED: 1
 
@@ -74,12 +74,12 @@ jobs:
         working-directory: elaph-crawler
         run: |
           count=$(python -c "
-from elaph_crawler.core import SupabaseManager
-from elaph_crawler.utils import Config
-config = Config.load()
-db = SupabaseManager(config.supabase_url, config.supabase_key)
-print(db.get_pending_count())
-")
+          from elaph_crawler.core import SupabaseManager
+          from elaph_crawler.utils import Config
+          config = Config.load()
+          db = SupabaseManager(config.supabase_url, config.supabase_key)
+          print(db.get_pending_count())
+          ")
           echo "pending_count=$count" >> $GITHUB_OUTPUT
           echo "New/changed URLs to crawl: $count"
 

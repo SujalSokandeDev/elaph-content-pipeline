@@ -30,7 +30,7 @@ env:
 jobs:
   crawl:
     name: Elaph Crawler
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.outputs.pending_count > 0) }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
 
@@ -72,7 +72,7 @@ jobs:
 
       - name: Run diagnostics
         working-directory: elaph-crawler
-        run: python -c "from elaph_crawler.pipeline import ElaphPipeline; p = ElaphPipeline(dry_run=false); p.run_diagnostics()"
+        run: python -c "from elaph_crawler.pipeline import ElaphPipeline; p = ElaphPipeline(dry_run=False); p.run_diagnostics()"
         env:
           PYTHONUNBUFFERED: 1
 
@@ -81,12 +81,12 @@ jobs:
         working-directory: elaph-crawler
         run: |
           count=$(python -c "
-from elaph_crawler.core import SupabaseManager
-from elaph_crawler.utils import Config
-config = Config.load()
-db = SupabaseManager(config.supabase_url, config.supabase_key)
-print(db.get_pending_count())
-")
+          from elaph_crawler.core import SupabaseManager
+          from elaph_crawler.utils import Config
+          config = Config.load()
+          db = SupabaseManager(config.supabase_url, config.supabase_key)
+          print(db.get_pending_count())
+          ")
           echo "pending_count=$count" >> $GITHUB_OUTPUT
           echo "Pending URLs: $count"
 
@@ -101,10 +101,14 @@ print(db.get_pending_count())
         if: steps.pending-check.outputs.pending_count > 0
         working-directory: elaph-crawler
         run: |
+          MAX_URLS_ARG=""
+          if [ -n "${{ github.event.inputs.max_urls }}" ]; then
+            MAX_URLS_ARG="--max-urls ${{ github.event.inputs.max_urls }}"
+          fi
           python elaph_crawler/pipeline.py \
             --mode ${{ github.event.inputs.mode || 'incremental' }} \
-            --time-limit ${{ github.event.inputs.time_limit || 18000 }}
-          ${{ '--max-urls ' + github.event.inputs.max_urls || '' }}
+            --time-limit ${{ github.event.inputs.time_limit || 18000 }} \
+            $MAX_URLS_ARG
         env:
           PYTHONUNBUFFERED: 1
 
@@ -114,12 +118,12 @@ print(db.get_pending_count())
         working-directory: elaph-crawler
         run: |
           count=$(python -c "
-from elaph_crawler.core import SupabaseManager
-from elaph_crawler.utils import Config
-config = Config.load()
-db = SupabaseManager(config.supabase_url, config.supabase_key)
-print(db.get_pending_count())
-")
+          from elaph_crawler.core import SupabaseManager
+          from elaph_crawler.utils import Config
+          config = Config.load()
+          db = SupabaseManager(config.supabase_url, config.supabase_key)
+          print(db.get_pending_count())
+          ")
           echo "pending_count=$count" >> $GITHUB_OUTPUT
           echo "Remaining pending: $count"
 
