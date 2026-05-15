@@ -293,77 +293,102 @@ class ElaphPipeline:
         processed = 0
         successful = 0
         failed = 0
+        stop_reason = None
 
         self.start_time = time.time()
+        chunk_size = 1000  # Supabase max rows per query
+        urls_remaining = max_urls  # None means unlimited
 
-        pending_urls = self.db.get_pending_urls(limit=max_urls or 10000)
-        total_pending = len(pending_urls)
-
-        self.logger.info(f"Found {total_pending} pending URLs to crawl")
+        self.logger.info(f"Starting crawl (time_limit={time_limit}s, max_urls={max_urls or 'unlimited'})")
         self.logger.info("")
 
-        for idx, url_record in enumerate(pending_urls):
-            if self.stop_requested:
-                self.logger.info("Stop requested, stopping crawl...")
+        # Fetch URLs in chunks — Supabase returns max 1000 per query
+        while True:
+            fetch_limit = min(chunk_size, urls_remaining) if urls_remaining else chunk_size
+            pending_urls = self.db.get_pending_urls(limit=fetch_limit)
+
+            if not pending_urls:
+                stop_reason = "No more pending URLs"
+                self.logger.info("No more pending URLs to crawl")
                 break
 
-            if max_urls and idx >= max_urls:
-                self.logger.info(f"Reached max URLs limit: {max_urls}")
-                break
+            self.logger.info(f"Fetched {len(pending_urls)} pending URLs (processed so far: {processed})")
 
-            if time_limit and (time.time() - self.start_time) >= time_limit:
-                self.logger.info(f"Reached time limit: {time_limit}s")
-                break
+            for url_record in pending_urls:
+                if self.stop_requested:
+                    stop_reason = "Stop requested"
+                    break
 
-            url = url_record["url"]
+                if urls_remaining is not None and processed >= max_urls:
+                    stop_reason = f"Reached max URLs limit: {max_urls}"
+                    break
 
-            if (idx + 1) % 10 == 0 or idx == 0:
-                elapsed = time.time() - self.start_time
-                rate = (idx + 1) / elapsed if elapsed > 0 else 0
-                remaining = (total_pending - idx) / rate if rate > 0 else 0
-                self.logger.info(
-                    f"Progress: {idx + 1}/{total_pending} | "
-                    f"Success: {successful} | Failed: {failed} | "
-                    f"Rate: {rate:.1f}/s | ETA: {remaining/60:.1f}min"
-                )
+                if time_limit and (time.time() - self.start_time) >= time_limit:
+                    stop_reason = f"Reached time limit: {time_limit}s"
+                    break
 
-            try:
-                response = self.fetcher.get(url, impersonate='chrome')
+                url = url_record["url"]
 
-                if response and response.status == 200:
-                    article = self.article_scraper.extract(response)
-
-                    if article and article.get("content"):
-                        content_hash = self.article_scraper.compute_content_hash(
-                            article["content"]
-                        )
-
-                        batch.append(article)
-                        batch_urls.append({"url": url, "content_hash": content_hash})
-                        processed += 1
-                        successful += 1
-
-                        if len(batch) >= self.config.batch_size:
-                            self._flush_and_mark(batch, batch_urls, batch_id)
-                            batch = []
-                            batch_urls = []
-                            batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-                    else:
-                        failed += 1
-                        self.db.mark_url_error(url, "No content extracted")
-                else:
-                    failed += 1
-                    self.db.mark_url_error(
-                        url, f"HTTP {response.status if response else 'No response'}"
+                if (processed + 1) % 50 == 0 or processed == 0:
+                    elapsed = time.time() - self.start_time
+                    rate = processed / elapsed if elapsed > 0 else 0
+                    self.logger.info(
+                        f"Progress: {processed} crawled | "
+                        f"Success: {successful} | Failed: {failed} | "
+                        f"Rate: {rate:.1f}/s | Elapsed: {elapsed/60:.1f}min"
                     )
 
-            except Exception as e:
-                failed += 1
-                self.db.mark_url_error(url, str(e))
-                self.logger.debug(f"Error crawling {url}: {e}")
+                try:
+                    response = self.fetcher.get(url, impersonate='chrome')
 
-            time.sleep(self.config.request_delay)
+                    if response and response.status == 200:
+                        article = self.article_scraper.extract(response)
+
+                        if article and article.get("content"):
+                            content_hash = self.article_scraper.compute_content_hash(
+                                article["content"]
+                            )
+
+                            batch.append(article)
+                            batch_urls.append({"url": url, "content_hash": content_hash})
+                            processed += 1
+                            successful += 1
+
+                            if len(batch) >= self.config.batch_size:
+                                self._flush_and_mark(batch, batch_urls, batch_id)
+                                batch = []
+                                batch_urls = []
+                                batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+                        else:
+                            processed += 1
+                            failed += 1
+                            self.db.mark_url_error(url, "No content extracted")
+                    else:
+                        processed += 1
+                        failed += 1
+                        self.db.mark_url_error(
+                            url, f"HTTP {response.status if response else 'No response'}"
+                        )
+
+                except Exception as e:
+                    processed += 1
+                    failed += 1
+                    self.db.mark_url_error(url, str(e))
+                    self.logger.debug(f"Error crawling {url}: {e}")
+
+                time.sleep(self.config.request_delay)
+
+            # Break outer loop if we hit a stop condition
+            if stop_reason:
+                self.logger.info(stop_reason)
+                break
+
+            # Update urls_remaining for max_urls tracking
+            if urls_remaining is not None:
+                urls_remaining = max_urls - processed
+                if urls_remaining <= 0:
+                    break
 
         # Flush remaining batch
         if batch:
@@ -379,6 +404,7 @@ class ElaphPipeline:
 
         stats = self.db.get_stats()
 
+        elapsed_total = time.time() - self.start_time
         self.logger.info("")
         self.logger.info("=" * 70)
         self.logger.info("CRAWL COMPLETE")
@@ -386,6 +412,7 @@ class ElaphPipeline:
         self.logger.info(f"Processed: {processed}")
         self.logger.info(f"Successful: {successful}")
         self.logger.info(f"Failed: {failed}")
+        self.logger.info(f"Duration: {elapsed_total/60:.1f} minutes")
         self.logger.info(f"Remaining pending: {stats['pending']}")
         self.logger.info("=" * 70)
 
