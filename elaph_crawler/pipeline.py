@@ -18,6 +18,7 @@ import json
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Tuple, List
@@ -287,7 +288,7 @@ class ElaphPipeline:
         self.db.create_checkpoint(crawl_id, mode, total_urls=0)
 
         batch = []
-        batch_urls = []  # track URLs in current batch for deferred marking
+        batch_urls = []
         batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
         processed = 0
@@ -296,13 +297,14 @@ class ElaphPipeline:
         stop_reason = None
 
         self.start_time = time.time()
-        chunk_size = 1000  # Supabase max rows per query
-        urls_remaining = max_urls  # None means unlimited
+        chunk_size = 1000
+        urls_remaining = max_urls
+        workers = self.config.concurrent_workers
 
-        self.logger.info(f"Starting crawl (time_limit={time_limit}s, max_urls={max_urls or 'unlimited'})")
+        self.logger.info(f"Starting crawl (workers={workers}, delay={self.config.request_delay}s, "
+                         f"time_limit={time_limit}s, max_urls={max_urls or 'unlimited'})")
         self.logger.info("")
 
-        # Fetch URLs in chunks — Supabase returns max 1000 per query
         while True:
             fetch_limit = min(chunk_size, urls_remaining) if urls_remaining else chunk_size
             pending_urls = self.db.get_pending_urls(limit=fetch_limit)
@@ -314,77 +316,58 @@ class ElaphPipeline:
 
             self.logger.info(f"Fetched {len(pending_urls)} pending URLs (processed so far: {processed})")
 
-            for url_record in pending_urls:
-                if self.stop_requested:
-                    stop_reason = "Stop requested"
-                    break
+            # Process chunk with concurrent workers
+            url_list = [r["url"] for r in pending_urls]
+            futures = {}
 
-                if urls_remaining is not None and processed >= max_urls:
-                    stop_reason = f"Reached max URLs limit: {max_urls}"
-                    break
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                for url in url_list:
+                    if self.stop_requested:
+                        stop_reason = "Stop requested"
+                        break
+                    if urls_remaining is not None and (processed + len(futures)) >= max_urls:
+                        stop_reason = f"Reached max URLs limit: {max_urls}"
+                        break
+                    if time_limit and (time.time() - self.start_time) >= time_limit:
+                        stop_reason = f"Reached time limit: {time_limit}s"
+                        break
 
-                if time_limit and (time.time() - self.start_time) >= time_limit:
-                    stop_reason = f"Reached time limit: {time_limit}s"
-                    break
+                    future = executor.submit(self._scrape_one, url)
+                    futures[future] = url
+                    time.sleep(self.config.request_delay)
 
-                url = url_record["url"]
+                # Collect results
+                for future in as_completed(futures):
+                    result = future.result()
+                    processed += 1
 
-                if (processed + 1) % 50 == 0 or processed == 0:
-                    elapsed = time.time() - self.start_time
-                    rate = processed / elapsed if elapsed > 0 else 0
-                    self.logger.info(
-                        f"Progress: {processed} crawled | "
-                        f"Success: {successful} | Failed: {failed} | "
-                        f"Rate: {rate:.1f}/s | Elapsed: {elapsed/60:.1f}min"
-                    )
+                    if result["status"] == "success":
+                        successful += 1
+                        batch.append(result["article"])
+                        batch_urls.append({"url": result["url"], "content_hash": result["content_hash"]})
 
-                try:
-                    response = self.fetcher.get(url, impersonate='chrome')
-
-                    if response and response.status == 200:
-                        article = self.article_scraper.extract(response)
-
-                        if article and article.get("content"):
-                            content_hash = self.article_scraper.compute_content_hash(
-                                article["content"]
-                            )
-
-                            batch.append(article)
-                            batch_urls.append({"url": url, "content_hash": content_hash})
-                            processed += 1
-                            successful += 1
-
-                            if len(batch) >= self.config.batch_size:
-                                self._flush_and_mark(batch, batch_urls, batch_id)
-                                batch = []
-                                batch_urls = []
-                                batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-                        else:
-                            processed += 1
-                            failed += 1
-                            self.db.mark_url_error(url, "No content extracted")
+                        if len(batch) >= self.config.batch_size:
+                            self._flush_and_mark(batch, batch_urls, batch_id)
+                            batch = []
+                            batch_urls = []
+                            batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                     else:
-                        processed += 1
                         failed += 1
-                        self.db.mark_url_error(
-                            url, f"HTTP {response.status if response else 'No response'}"
+                        self.db.mark_url_error(result["url"], result["error"])
+
+                    if processed % 100 == 0 or processed == 1:
+                        elapsed = time.time() - self.start_time
+                        rate = processed / elapsed if elapsed > 0 else 0
+                        self.logger.info(
+                            f"Progress: {processed} crawled | "
+                            f"Success: {successful} | Failed: {failed} | "
+                            f"Rate: {rate:.1f}/s | Elapsed: {elapsed/60:.1f}min"
                         )
 
-                except Exception as e:
-                    processed += 1
-                    failed += 1
-                    self.db.mark_url_error(url, str(e))
-                    self.logger.debug(f"Error crawling {url}: {e}")
-
-                time.sleep(self.config.request_delay)
-
-            # Break outer loop if we hit a stop condition
             if stop_reason:
                 self.logger.info(stop_reason)
                 break
 
-            # Update urls_remaining for max_urls tracking
             if urls_remaining is not None:
                 urls_remaining = max_urls - processed
                 if urls_remaining <= 0:
@@ -405,6 +388,7 @@ class ElaphPipeline:
         stats = self.db.get_stats()
 
         elapsed_total = time.time() - self.start_time
+        rate_final = processed / elapsed_total if elapsed_total > 0 else 0
         self.logger.info("")
         self.logger.info("=" * 70)
         self.logger.info("CRAWL COMPLETE")
@@ -413,6 +397,7 @@ class ElaphPipeline:
         self.logger.info(f"Successful: {successful}")
         self.logger.info(f"Failed: {failed}")
         self.logger.info(f"Duration: {elapsed_total/60:.1f} minutes")
+        self.logger.info(f"Avg Rate: {rate_final:.1f} URLs/sec")
         self.logger.info(f"Remaining pending: {stats['pending']}")
         self.logger.info("=" * 70)
 
@@ -423,6 +408,25 @@ class ElaphPipeline:
             "failed": failed,
             "pending": stats["pending"],
         }
+
+    def _scrape_one(self, url: str) -> Dict:
+        """Scrape a single URL. Thread-safe — each call uses its own request."""
+        try:
+            response = self.fetcher.get(url, impersonate='chrome')
+
+            if response and response.status == 200:
+                article = self.article_scraper.extract(response)
+
+                if article and article.get("content"):
+                    content_hash = self.article_scraper.compute_content_hash(article["content"])
+                    return {"status": "success", "url": url, "article": article, "content_hash": content_hash}
+                else:
+                    return {"status": "error", "url": url, "error": "No content extracted"}
+            else:
+                status = response.status if response else 'No response'
+                return {"status": "error", "url": url, "error": f"HTTP {status}"}
+        except Exception as e:
+            return {"status": "error", "url": url, "error": str(e)[:300]}
 
     def _flush_and_mark(self, batch: List[Dict], batch_urls: List[Dict], batch_id: str):
         """Flush batch to BigQuery, then mark URLs as done only on success."""

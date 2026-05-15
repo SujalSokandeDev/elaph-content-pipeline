@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Elaph Content Pipeline — Status Dashboard</title>
+    <meta name="description" content="Real-time monitoring dashboard for the Elaph content crawling pipeline">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { font-family: 'Inter', system-ui, sans-serif; background: #F8FAFC; }
+        .stat-card { transition: transform 0.2s, box-shadow 0.2s; }
+        .stat-card:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,0,0,0.08); }
+        .pulse-dot { animation: pulse 2s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .fade-in { animation: fadeIn 0.6s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .shimmer { background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; }
+        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+    </style>
+</head>
+<body class="min-h-screen">
+    <!-- Header -->
+    <header class="bg-white border-b border-gray-100 sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center">
+                    <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/>
+                    </svg>
+                </div>
+                <h1 class="text-xl font-bold text-gray-900">Elaph Content Pipeline</h1>
+                <span id="live-badge" class="hidden ml-2 inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-200">
+                    <span class="w-1.5 h-1.5 bg-green-500 rounded-full pulse-dot"></span>
+                    Live
+                </span>
+            </div>
+            <div class="flex items-center gap-4">
+                <span id="last-updated" class="text-sm text-gray-400">Loading...</span>
+                <button onclick="refreshData()" class="p-2 rounded-lg hover:bg-gray-100 transition-colors text-gray-500 hover:text-gray-700" title="Refresh">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        <!-- Stat Cards -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" id="stats-grid">
+            <div class="stat-card bg-white rounded-2xl p-6 border border-gray-100 shadow-sm fade-in">
+                <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center">
+                        <svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    </div>
+                    <div>
+                        <p id="stat-total" class="text-2xl font-bold text-gray-900">--</p>
+                        <p class="text-sm text-gray-500">Total URLs</p>
+                    </div>
+                </div>
+            </div>
+            <div class="stat-card bg-white rounded-2xl p-6 border border-gray-100 shadow-sm fade-in">
+                <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 bg-amber-50 rounded-xl flex items-center justify-center">
+                        <svg class="w-6 h-6 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    </div>
+                    <div>
+                        <p id="stat-pending" class="text-2xl font-bold text-gray-900">--</p>
+                        <p class="text-sm text-gray-500">Pending</p>
+                    </div>
+                </div>
+            </div>
+            <div class="stat-card bg-white rounded-2xl p-6 border border-gray-100 shadow-sm fade-in">
+                <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 bg-green-50 rounded-xl flex items-center justify-center">
+                        <svg class="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <p id="stat-done" class="text-2xl font-bold text-gray-900">--</p>
+                            <span id="today-badge" class="hidden px-2 py-0.5 bg-green-100 text-green-700 text-xs font-medium rounded-full"></span>
+                        </div>
+                        <p class="text-sm text-gray-500">Crawled</p>
+                    </div>
+                </div>
+            </div>
+            <div class="stat-card bg-white rounded-2xl p-6 border border-gray-100 shadow-sm fade-in">
+                <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 bg-red-50 rounded-xl flex items-center justify-center">
+                        <svg class="w-6 h-6 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    </div>
+                    <div>
+                        <p id="stat-error" class="text-2xl font-bold text-gray-900">--</p>
+                        <p class="text-sm text-gray-500">Errors</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Progress Bar -->
+        <div class="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm fade-in">
+            <div class="flex items-center justify-between mb-2">
+                <span id="progress-text" class="text-sm font-semibold text-blue-600">0% Complete</span>
+                <span id="progress-detail" class="text-xs text-gray-400"></span>
+            </div>
+            <div class="w-full bg-gray-100 rounded-full h-2.5">
+                <div id="progress-bar" class="bg-blue-600 h-2.5 rounded-full transition-all duration-1000" style="width: 0%"></div>
+            </div>
+        </div>
+
+        <!-- Chart + Health -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- Daily Activity Chart -->
+            <div class="lg:col-span-2 bg-white rounded-2xl p-6 border border-gray-100 shadow-sm fade-in">
+                <h2 class="text-base font-semibold text-gray-900 mb-4">Daily Crawl Activity <span class="text-gray-400 font-normal text-sm">(Last 14 Days)</span></h2>
+                <div class="h-64">
+                    <canvas id="dailyChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Pipeline Health -->
+            <div class="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm fade-in">
+                <h2 class="text-base font-semibold text-gray-900 mb-5">Pipeline Health</h2>
+                <div class="space-y-5">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <div class="w-9 h-9 bg-green-50 rounded-lg flex items-center justify-center">
+                                <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+                            </div>
+                            <span class="text-sm text-gray-600">Success Rate</span>
+                        </div>
+                        <span id="health-success" class="text-sm font-bold text-green-600">--</span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <div class="w-9 h-9 bg-blue-50 rounded-lg flex items-center justify-center">
+                                <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                            </div>
+                            <span class="text-sm text-gray-600">Avg Rate</span>
+                        </div>
+                        <span id="health-rate" class="text-sm font-bold text-blue-600">--</span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <div class="w-9 h-9 bg-purple-50 rounded-lg flex items-center justify-center">
+                                <svg class="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            </div>
+                            <span class="text-sm text-gray-600">Est. Completion</span>
+                        </div>
+                        <span id="health-eta" class="text-sm font-bold text-purple-600">--</span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <div class="w-9 h-9 bg-amber-50 rounded-lg flex items-center justify-center">
+                                <svg class="w-5 h-5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                            </div>
+                            <span class="text-sm text-gray-600">Next Run</span>
+                        </div>
+                        <span id="health-next" class="text-sm font-bold text-amber-600">4:00 AM IST</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Runs Table -->
+        <div class="bg-white rounded-2xl border border-gray-100 shadow-sm fade-in overflow-hidden">
+            <div class="px-6 py-4 border-b border-gray-50">
+                <h2 class="text-base font-semibold text-gray-900">Recent Runs</h2>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead>
+                        <tr class="text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                            <th class="px-6 py-3">Run ID</th>
+                            <th class="px-6 py-3">Status</th>
+                            <th class="px-6 py-3">URLs Processed</th>
+                            <th class="px-6 py-3">Successful</th>
+                            <th class="px-6 py-3">Failed</th>
+                            <th class="px-6 py-3">Date</th>
+                        </tr>
+                    </thead>
+                    <tbody id="runs-table" class="divide-y divide-gray-50">
+                        <tr><td colspan="6" class="px-6 py-8 text-center text-sm text-gray-400">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="text-center text-xs text-gray-300 py-4">
+            Elaph Content Pipeline &middot; Auto-refreshes every 60s &middot; Data from Supabase
+        </footer>
+    </main>
+
+    <script>
+        // --- Supabase Config ---
+        const SUPABASE_URL = 'https://wqvtdlefonhnudybdyii.supabase.co';
+        const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndxdnRkbGVmb25obnVkeWJkeWlpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE1NjU3NDQsImV4cCI6MjA4NzE0MTc0NH0.kl4jbDR3g_VmNNn_teYQROC6FKkITx9B_IRcmMX957k';
+        const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        let dailyChart = null;
+
+        function fmt(n) { return n != null ? n.toLocaleString('en-IN') : '--'; }
+
+        // --- Fetch Stats ---
+        async function fetchStats() {
+            const counts = { total: 0, pending: 0, done: 0, error: 0 };
+            try {
+                const [totalR, pendR, doneR, errR] = await Promise.all([
+                    sb.from('elaph_crawl_state').select('url', { count: 'exact', head: true }),
+                    sb.from('elaph_crawl_state').select('url', { count: 'exact', head: true }).eq('status', 'pending'),
+                    sb.from('elaph_crawl_state').select('url', { count: 'exact', head: true }).eq('status', 'done'),
+                    sb.from('elaph_crawl_state').select('url', { count: 'exact', head: true }).eq('status', 'error'),
+                ]);
+                counts.total = totalR.count || 0;
+                counts.pending = pendR.count || 0;
+                counts.done = doneR.count || 0;
+                counts.error = errR.count || 0;
+            } catch (e) { console.error('Stats error:', e); }
+            return counts;
+        }
+
+        // --- Fetch Checkpoints ---
+        async function fetchCheckpoints() {
+            try {
+                const { data } = await sb.from('elaph_crawl_checkpoints')
+                    .select('*')
+                    .order('start_time', { ascending: false })
+                    .limit(20);
+                return data || [];
+            } catch (e) { console.error('Checkpoints error:', e); return []; }
+        }
+
+        // --- Build Daily Chart Data from Checkpoints ---
+        function buildDailyData(checkpoints) {
+            const daily = {};
+            const today = new Date();
+            // Init last 14 days with 0
+            for (let i = 13; i >= 0; i--) {
+                const d = new Date(today); d.setDate(d.getDate() - i);
+                daily[d.toISOString().split('T')[0]] = 0;
+            }
+            checkpoints.forEach(cp => {
+                if (!cp.start_time) return;
+                const day = cp.start_time.split('T')[0];
+                if (daily[day] !== undefined) daily[day] += (cp.processed_urls || 0);
+            });
+            return { labels: Object.keys(daily).map(d => { const dt = new Date(d); return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); }), values: Object.values(daily) };
+        }
+
+        // --- Render Chart ---
+        function renderChart(labels, values) {
+            const ctx = document.getElementById('dailyChart').getContext('2d');
+            if (dailyChart) dailyChart.destroy();
+            dailyChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [{
+                        label: 'URLs Crawled',
+                        data: values,
+                        borderColor: '#2563EB',
+                        backgroundColor: 'rgba(37,99,235,0.08)',
+                        borderWidth: 2.5,
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 4,
+                        pointBackgroundColor: '#2563EB',
+                        pointBorderColor: '#fff',
+                        pointBorderWidth: 2,
+                        pointHoverRadius: 6,
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: { beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { font: { size: 11 } } },
+                        x: { grid: { display: false }, ticks: { font: { size: 11 }, maxRotation: 45 } }
+                    }
+                }
+            });
+        }
+
+        // --- Render Runs Table ---
+        function renderRuns(checkpoints) {
+            const tbody = document.getElementById('runs-table');
+            if (!checkpoints.length) { tbody.innerHTML = '<tr><td colspan="6" class="px-6 py-8 text-center text-sm text-gray-400">No runs recorded yet</td></tr>'; return; }
+            tbody.innerHTML = checkpoints.slice(0, 10).map(cp => {
+                const st = cp.status || 'unknown';
+                const badge = st === 'completed'
+                    ? '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-50 text-green-700"><svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>Success</span>'
+                    : st === 'running'
+                    ? '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700"><span class="w-1.5 h-1.5 bg-blue-500 rounded-full pulse-dot"></span>Running</span>'
+                    : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">' + st + '</span>';
+                const date = cp.start_time ? new Date(cp.start_time).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '--';
+                return `<tr class="hover:bg-gray-50/50 transition-colors">
+                    <td class="px-6 py-3 text-sm font-mono text-blue-600">${(cp.crawl_id || '').substring(0, 30)}</td>
+                    <td class="px-6 py-3">${badge}</td>
+                    <td class="px-6 py-3 text-sm font-semibold text-gray-700">${fmt(cp.processed_urls)}</td>
+                    <td class="px-6 py-3 text-sm text-green-600">${fmt(cp.successful_urls)}</td>
+                    <td class="px-6 py-3 text-sm text-red-500">${fmt(cp.failed_urls)}</td>
+                    <td class="px-6 py-3 text-sm text-gray-500">${date}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        // --- Main Refresh ---
+        async function refreshData() {
+            const [stats, checkpoints] = await Promise.all([fetchStats(), fetchCheckpoints()]);
+
+            // Stats
+            document.getElementById('stat-total').textContent = fmt(stats.total);
+            document.getElementById('stat-pending').textContent = fmt(stats.pending);
+            document.getElementById('stat-done').textContent = fmt(stats.done);
+            document.getElementById('stat-error').textContent = fmt(stats.error);
+
+            // Progress
+            const pct = stats.total > 0 ? ((stats.done / stats.total) * 100) : 0;
+            document.getElementById('progress-bar').style.width = pct + '%';
+            document.getElementById('progress-text').textContent = pct.toFixed(1) + '% Complete';
+            document.getElementById('progress-detail').textContent = `${fmt(stats.done)} of ${fmt(stats.total)} URLs crawled`;
+
+            // Today badge
+            const todayStr = new Date().toISOString().split('T')[0];
+            const todayCount = checkpoints.filter(cp => cp.start_time && cp.start_time.startsWith(todayStr)).reduce((s, cp) => s + (cp.processed_urls || 0), 0);
+            const badge = document.getElementById('today-badge');
+            if (todayCount > 0) { badge.textContent = '+' + fmt(todayCount) + ' today'; badge.classList.remove('hidden'); }
+
+            // Health metrics
+            const completedRuns = checkpoints.filter(cp => cp.status === 'completed');
+            const totalProcessed = completedRuns.reduce((s, cp) => s + (cp.processed_urls || 0), 0);
+            const totalSuccessful = completedRuns.reduce((s, cp) => s + (cp.successful_urls || 0), 0);
+            const successRate = totalProcessed > 0 ? ((totalSuccessful / totalProcessed) * 100) : 0;
+            document.getElementById('health-success').textContent = successRate.toFixed(1) + '%';
+
+            // Avg rate: total processed / total time
+            let totalTimeSec = 0;
+            completedRuns.forEach(cp => {
+                if (cp.start_time && cp.end_time) {
+                    totalTimeSec += (new Date(cp.end_time) - new Date(cp.start_time)) / 1000;
+                }
+            });
+            const avgRate = totalTimeSec > 0 ? (totalProcessed / totalTimeSec) : 0;
+            document.getElementById('health-rate').textContent = avgRate.toFixed(1) + ' URLs/sec';
+
+            // ETA
+            const remaining = stats.pending;
+            if (avgRate > 0 && remaining > 0) {
+                const etaDays = Math.ceil(remaining / (avgRate * 19200)); // 19200s per run per day
+                document.getElementById('health-eta').textContent = '~' + etaDays + ' days';
+            } else {
+                document.getElementById('health-eta').textContent = remaining === 0 ? 'Done!' : 'Calculating...';
+            }
+
+            // Chart
+            const { labels, values } = buildDailyData(checkpoints);
+            renderChart(labels, values);
+
+            // Runs table
+            renderRuns(checkpoints);
+
+            // Live badge + timestamp
+            document.getElementById('live-badge').classList.remove('hidden');
+            document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+        }
+
+        // --- Init ---
+        refreshData();
+        setInterval(refreshData, 60000); // Auto-refresh every 60s
+    </script>
+</body>
+</html>
