@@ -27,11 +27,12 @@ class Config:
     sitemap_main: str = "https://elaph.com/sitemaps/allsitemaps.xml"
     sitemap_google_news: str = "https://elaph.com/sitemaps/google_news.xml"
 
-    batch_size: int = 20
+    batch_size: int = 200
     request_delay: float = 0.1
     max_retries: int = 3
     max_url_failures: int = 5
-    concurrent_workers: int = 10
+    concurrent_workers: int = 25
+    max_retries_per_url: int = 3
 
     log_level: str = "INFO"
     log_file: str = ""
@@ -70,11 +71,12 @@ class Config:
                 "SITEMAP_GOOGLE_NEWS",
                 "https://elaph.com/sitemaps/google_news.xml"
             ),
-            batch_size=int(os.getenv("BATCH_SIZE", "20")),
+            batch_size=int(os.getenv("BATCH_SIZE", "200")),
             request_delay=float(os.getenv("REQUEST_DELAY", "0.1")),
             max_retries=int(os.getenv("MAX_RETRIES", "3")),
             max_url_failures=int(os.getenv("MAX_URL_FAILURES", "5")),
-            concurrent_workers=int(os.getenv("CONCURRENT_WORKERS", "10")),
+            concurrent_workers=int(os.getenv("CONCURRENT_WORKERS", "25")),
+            max_retries_per_url=int(os.getenv("MAX_RETRIES_PER_URL", "3")),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_file=os.getenv("LOG_FILE", str(logs_dir / "elaph_crawler.log")),
         )

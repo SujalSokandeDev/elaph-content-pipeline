@@ -353,7 +353,10 @@ class ElaphPipeline:
                             batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                     else:
                         failed += 1
-                        self.db.mark_url_error(result["url"], result["error"])
+                        self.db.mark_url_error(
+                            result["url"], result["error"],
+                            max_retries=self.config.max_retries_per_url,
+                        )
 
                     if processed % 100 == 0 or processed == 1:
                         elapsed = time.time() - self.start_time
@@ -410,28 +413,62 @@ class ElaphPipeline:
         }
 
     def _scrape_one(self, url: str) -> Dict:
-        """Scrape a single URL. Thread-safe — each call uses its own request."""
-        try:
-            response = self.fetcher.get(url, impersonate='chrome')
+        """Scrape a single URL with exponential backoff on retryable errors."""
+        import random
+        max_attempts = self.config.max_retries
 
-            if response and response.status == 200:
-                article = self.article_scraper.extract(response)
+        for attempt in range(max_attempts):
+            try:
+                response = self.fetcher.get(url, impersonate='chrome')
 
-                if article and article.get("content"):
-                    content_hash = self.article_scraper.compute_content_hash(article["content"])
-                    return {"status": "success", "url": url, "article": article, "content_hash": content_hash}
-                else:
-                    return {"status": "error", "url": url, "error": "No content extracted"}
-            else:
+                if response and response.status in (429, 503):
+                    # Rate limited or server overloaded — back off and retry
+                    wait = (2 ** attempt) + random.uniform(0.5, 1.5)
+                    self.logger.debug(f"HTTP {response.status} on {url[:60]}, backing off {wait:.1f}s (attempt {attempt+1}/{max_attempts})")
+                    time.sleep(wait)
+                    continue
+
+                if response and response.status == 200:
+                    article = self.article_scraper.extract(response)
+
+                    if article and self._is_valid_article(article):
+                        content_hash = self.article_scraper.compute_content_hash(article["content"])
+                        return {"status": "success", "url": url, "article": article, "content_hash": content_hash}
+                    else:
+                        return {"status": "error", "url": url, "error": "No content extracted or validation failed"}
+
+                if response and response.status == 404:
+                    # Permanent error — don't retry
+                    return {"status": "error", "url": url, "error": "HTTP 404 Not Found"}
+
                 status = response.status if response else 'No response'
                 return {"status": "error", "url": url, "error": f"HTTP {status}"}
-        except Exception as e:
-            return {"status": "error", "url": url, "error": str(e)[:300]}
+
+            except Exception as e:
+                if attempt < max_attempts - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                return {"status": "error", "url": url, "error": str(e)[:300]}
+
+        return {"status": "error", "url": url, "error": f"All {max_attempts} fetch attempts failed"}
+
+    def _is_valid_article(self, article: Dict) -> bool:
+        """Validate that an extracted article has sufficient content."""
+        title = article.get("title") or ""
+        content = article.get("content") or ""
+        url = article.get("url") or ""
+        return (
+            len(title.strip()) > 5 and
+            len(content.strip()) > 100 and
+            bool(url)
+        )
 
     def _flush_and_mark(self, batch: List[Dict], batch_urls: List[Dict], batch_id: str):
         """Flush batch to BigQuery, then mark URLs as done only on success."""
         if not batch:
             return
+
+        self.logger.info(f"[BigQuery] Inserting batch of {len(batch)} articles | Batch ID: {batch_id}")
 
         try:
             inserted, failed_count, error_list = self.bq_manager.insert_batch(batch, batch_id)
@@ -442,15 +479,25 @@ class ElaphPipeline:
                 # BigQuery insert succeeded — now mark all batch URLs as done
                 for item in batch_urls:
                     self.db.mark_url_done(item["url"], batch_id, item["content_hash"])
+                self.logger.info(f"[BigQuery] Batch {batch_id} committed successfully ({len(batch)} articles)")
             else:
-                # BigQuery insert failed — mark URLs as error so they get retried
+                # BigQuery insert failed — URLs stay pending via retry logic
+                self.logger.error(f"[BigQuery] Batch {batch_id} had {failed_count} failures, resetting URLs for retry")
                 for item in batch_urls:
-                    self.db.mark_url_error(item["url"], f"BigQuery batch insert failed: {error_list[:1]}")
+                    self.db.mark_url_error(
+                        item["url"],
+                        f"BigQuery batch insert failed: {error_list[:1]}",
+                        max_retries=self.config.max_retries_per_url,
+                    )
         except Exception as e:
-            self.logger.error(f"Batch insert failed: {e}")
-            # Mark all URLs in failed batch as error so they get retried
+            self.logger.error(f"[BigQuery] Batch insert exception: {e}")
+            # Mark all URLs in failed batch for retry
             for item in batch_urls:
-                self.db.mark_url_error(item["url"], f"BigQuery exception: {str(e)[:200]}")
+                self.db.mark_url_error(
+                    item["url"],
+                    f"BigQuery exception: {str(e)[:200]}",
+                    max_retries=self.config.max_retries_per_url,
+                )
 
     def show_stats(self):
         """Display crawl statistics."""

@@ -181,20 +181,56 @@ class SupabaseManager:
             logging.error(f"Failed to mark URL done: {url}: {e}")
             return False
 
-    def mark_url_error(self, url: str, error_message: str) -> bool:
+    def mark_url_error(self, url: str, error_message: str, max_retries: int = 3) -> bool:
         """
-        Mark a URL as failed with an error message.
+        Handle a failed URL with retry logic.
+        
+        - If scrape_count < max_retries: reset to 'pending' for automatic retry
+        - If scrape_count >= max_retries: mark as permanently 'failed'
+
+        Uses existing 'scrape_count' column as retry counter and
+        'error_message' column for the last error.
 
         Args:
             url: The URL that failed
             error_message: Description of what went wrong
+            max_retries: Max retry attempts before permanent failure
 
         Returns:
             True if update succeeded
         """
         try:
+            # Fetch current retry count
+            resp = (
+                self.client.table(self.STATE_TABLE)
+                .select("scrape_count")
+                .eq("url", url)
+                .execute()
+            )
+            current_retries = 0
+            if resp.data and len(resp.data) > 0:
+                current_retries = resp.data[0].get("scrape_count") or 0
+
+            new_retry_count = current_retries + 1
+
+            if new_retry_count >= max_retries:
+                # Permanently failed — mark as error so it won't be retried
+                new_status = "error"
+                logging.warning(
+                    f"[FAILED] Permanently failed after {new_retry_count} attempts: "
+                    f"{url[:80]} | Error: {error_message[:100]}"
+                )
+            else:
+                # Reset to pending for retry
+                new_status = "pending"
+                logging.info(
+                    f"[RETRY] URL marked for retry (attempt {new_retry_count}/{max_retries}): "
+                    f"{url[:80]}"
+                )
+
             self.client.table(self.STATE_TABLE).update({
-                "status": "error",
+                "status": new_status,
+                "scrape_count": new_retry_count,
                 "error_message": error_message[:500],
                 "crawled_at": datetime.now().isoformat(),
             }).eq("url", url).execute()

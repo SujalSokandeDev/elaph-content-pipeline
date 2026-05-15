@@ -78,11 +78,12 @@ jobs:
           GOOGLE_CREDENTIALS_PATH=./data/service-account.json
           SITEMAP_MAIN=https://elaph.com/sitemaps/allsitemaps.xml
           SITEMAP_GOOGLE_NEWS=https://elaph.com/sitemaps/google_news.xml
-          BATCH_SIZE=20
-          REQUEST_DELAY=0.1
+          BATCH_SIZE=200
+          REQUEST_DELAY=0
           MAX_RETRIES=3
           MAX_URL_FAILURES=5
-          CONCURRENT_WORKERS=10
+          CONCURRENT_WORKERS=25
+          MAX_RETRIES_PER_URL=3
           LOG_LEVEL=INFO
           LOG_FILE=./logs/elaph_crawler.log
           ENVEOF
